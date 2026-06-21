@@ -5,7 +5,6 @@ import json
 import os
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from ultralytics import YOLO
 from torchvision import transforms, models
 from PIL import Image
 import torch.nn as nn
@@ -15,16 +14,8 @@ import threading
 app = Flask(__name__)
 
 # ── Cấu hình đường dẫn ──────────────────────────────────────
-YOLO_MODEL_PATH    = r"C:\canteen_project\models\yolov8_canteen.pt"
 RESNET_MODEL_PATH = r"C:\canteen_project\models\resnet50_canteen.pt"
-METADATA_PATH      = r"C:\canteen_project\models\metadata.json"
-CORNERS_PATH        = "corners.json"   # tạo bằng calibrate.py
-
-# Ngưỡng YOLO khi tìm món TRONG TỪNG Ô NHỎ (vùng tìm đã bị giới hạn rồi
-# nên có thể để conf cao hơn lúc chạy trên cả khung hình, đỡ nhiễu)
-YOLO_CONF_IN_CELL = 0.25
-# Lề thêm quanh box YOLO tìm được, để không cắt sát quá mất chi tiết món
-YOLO_BOX_PAD = 8
+METADATA_PATH     = r"C:\canteen_project\models\metadata.json"
 
 # ── Bảng giá ────────────────────────────────────────────────
 MENU_PRICES = {
@@ -40,9 +31,6 @@ MENU_PRICES = {
     "9. Rau xào"        : 10000,
 }
 
-# ── Ngưỡng tin cậy: dưới mức này coi như ô trống / không chắc ─
-CONF_THRESHOLD = 0.55
-
 # ── Load metadata ────────────────────────────────────────────
 with open(METADATA_PATH, "r", encoding="utf-8") as f:
     metadata = json.load(f)
@@ -51,28 +39,18 @@ idx_to_class = {int(k): v for k, v in metadata["idx_to_class"].items()}
 NUM_CLASSES  = metadata["num_classes"]
 print(f"✅ Loaded {NUM_CLASSES} classes")
 
-# ── Vì khay LUÔN có đúng 5 món, KHÔNG trùng nhau, và ô cơm LUÔN là cơm trắng ─
-# -> tận dụng 2 ràng buộc này để tăng độ chính xác (xem hàm phan_loai_5_o ở dưới)
-RICE_LABEL = "1. Cơm trắng"
-
 
 def _chuan_hoa(s):
     return unicodedata.normalize('NFC', s.strip())
 
 
-RICE_IDX = None
-for idx, name in idx_to_class.items():
-    if _chuan_hoa(name) == _chuan_hoa(RICE_LABEL):
-        RICE_IDX = idx
-        break
-
-if RICE_IDX is None:
-    print(f"⚠️ Không tìm thấy class '{RICE_LABEL}' trong metadata.json — "
-          f"kiểm tra lại tên class có khớp chính xác không.")
-
-OTHER_INDICES = [idx for idx in idx_to_class if idx != RICE_IDX]
-
+RICE_LABEL  = "1. Cơm trắng"
 SOUP_LABELS = ["6. Canh chua", "8. Canh rau"]
+
+RICE_IDX = next(
+    idx for idx, name in idx_to_class.items()
+    if _chuan_hoa(name) == _chuan_hoa(RICE_LABEL)
+)
 SOUP_INDICES = [
     idx for idx, name in idx_to_class.items()
     if _chuan_hoa(name) in [_chuan_hoa(s) for s in SOUP_LABELS]
@@ -81,29 +59,25 @@ OTHER_INDICES = [
     idx for idx in idx_to_class
     if idx != RICE_IDX and idx not in SOUP_INDICES
 ]
-print(f"✅ SOUP_INDICES={SOUP_INDICES}, OTHER_INDICES={OTHER_INDICES}")
-
-# Ràng buộc: Thịt kho và Thịt kho trứng KHÔNG được cùng xuất hiện
-THIT_KHO_LABEL       = "5. Thịt kho"
-THIT_KHO_TRUNG_LABEL = "4. Thịt kho trứng"
 
 idx_thit_kho = next(
     idx for idx, name in idx_to_class.items()
-    if _chuan_hoa(name) == _chuan_hoa(THIT_KHO_LABEL)
+    if _chuan_hoa(name) == _chuan_hoa("5. Thịt kho")
 )
 idx_thit_kho_trung = next(
     idx for idx, name in idx_to_class.items()
-    if _chuan_hoa(name) == _chuan_hoa(THIT_KHO_TRUNG_LABEL)
+    if _chuan_hoa(name) == _chuan_hoa("4. Thịt kho trứng")
 )
-
 idx_suon_nuong = next(
     idx for idx, name in idx_to_class.items()
     if _chuan_hoa(name) == _chuan_hoa("7. Sườn nướng")
 )
-# ── Load YOLOv8 (chỉ dùng để tìm món TRONG TỪNG Ô NHỎ, không chạy trên cả khung) ─
-print("🔍 Loading YOLOv8...")
-yolo_model = YOLO(YOLO_MODEL_PATH)
-print("✅ YOLOv8 loaded!")
+idx_trung_chien = next(
+    idx for idx, name in idx_to_class.items()
+    if _chuan_hoa(name) == _chuan_hoa("10. Trứng chiên")
+)
+
+print(f"✅ RICE_IDX={RICE_IDX}, SOUP_INDICES={SOUP_INDICES}")
 
 # ── Load ResNet50 ────────────────────────────────────────────
 print("🔍 Loading ResNet50...")
@@ -134,157 +108,58 @@ transform = transforms.Compose([
     )
 ])
 
-# ──────────────────────────────────────────────────────────────
-# PHẦN MỚI: TÌM KHAY + LÀM THẲNG + CẮT 5 Ô CỐ ĐỊNH
-# (thay cho việc dùng YOLO dò món ăn -> hết bị "ra một đống" box)
-# ──────────────────────────────────────────────────────────────
-
-# Tỉ lệ 5 ô đã canh trên khay inox 5 ô tiêu chuẩn.
-# Nếu khay/camera của bạn lệch chút, chỉnh 5 số này (xem debug_grid()).
+# ── Tỉ lệ cắt 5 ô ───────────────────────────────────────────
 RATIOS = {
-    "x_start" : 0.10,   # Bỏ khoảng nâu trái
-    "x_end"   : 0.90,   # Bỏ khoảng nâu phải
+    "x_start" : 0.10,
+    "x_end"   : 0.90,
     "y_start" : 0.02,
     "y_end"   : 0.98,
-    "split_y" : 0.47,   # Ranh giới hàng trên/dưới
+    "split_y" : 0.47,
 }
 PAD = 0.012
-WARP_W, WARP_H = 1600, 1200
 
 
-def order_points(pts):
-    pts = pts[np.argsort(pts[:, 1])]
-    top = pts[:2][np.argsort(pts[:2, 0])]
-    bottom = pts[2:][np.argsort(pts[2:, 0])]
-    return np.array([top[0], top[1], bottom[1], bottom[0]], dtype="float32")
-
-
-def find_tray_corners_auto(img):
-    """Tự dò khay bằng contour (dùng khi chưa calibrate corners.json)."""
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise ValueError("Không tìm thấy khay trong khung hình")
-    c = max(contours, key=cv2.contourArea)
-    area_ratio = cv2.contourArea(c) / (img.shape[0] * img.shape[1])
-    if area_ratio < 0.15:
-        raise ValueError("Khay quá nhỏ / không nằm trong khung hình")
-    rect = cv2.minAreaRect(c)
-    box = cv2.boxPoints(rect)
-    return order_points(box)
-
-
-# Nếu đã chạy calibrate.py thì dùng tọa độ cố định (nhanh + ổn định hơn)
-FIXED_CORNERS = None
-if os.path.exists(CORNERS_PATH):
-    with open(CORNERS_PATH, "r") as f:
-        pts = json.load(f)
-    FIXED_CORNERS = order_points(np.array(pts, dtype="float32"))
-    print("✅ Dùng tọa độ khay đã calibrate (corners.json)")
-else:
-    print("⚠️ Chưa có corners.json — đang tự dò khay mỗi frame (kém ổn định hơn). "
-          "Nên chạy `python calibrate.py` 1 lần để cố định vị trí khay.")
-
-
-def get_tray_corners(img):
-    if FIXED_CORNERS is not None:
-        return FIXED_CORNERS
-    return find_tray_corners_auto(img)
-
-
-def warp_tray(img, corners, out_w=WARP_W, out_h=WARP_H):
-    dst = np.array(
-        [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],
-        dtype="float32",
-    )
-    M = cv2.getPerspectiveTransform(corners, dst)
-    return cv2.warpPerspective(img, M, (out_w, out_h))
-
-
-def crop_5_compartments(warped_img, ratios=RATIOS, pad=PAD):
-    H, W = warped_img.shape[:2]
-    r = ratios
-
-    x0  = r["x_start"]
-    x1  = r["x_end"]
-    y0  = r["y_start"]
-    y1  = r["y_end"]
-    sy  = r["split_y"]
+def crop_5_compartments(frame, ratios=RATIOS, pad=PAD):
+    H, W = frame.shape[:2]
+    r  = ratios
+    x0 = r["x_start"]
+    x1 = r["x_end"]
+    y0 = r["y_start"]
+    y1 = r["y_end"]
+    sy = r["split_y"]
     mid = (x0 + x1) / 2
     w3  = (x1 - x0) / 3
 
     def cut(rx1, ry1, rx2, ry2):
-        return warped_img[
+        return frame[
             int(H*(ry1+pad)) : int(H*(ry2-pad)),
             int(W*(rx1+pad)) : int(W*(rx2-pad))
         ]
 
     return {
-        # Hàng TRÊN: 2 ô lớn
-        "o4_com"  : cut(x0,      y0, mid,  sy),   # Trái: cơm
-        "o5_canh" : cut(mid,     y0, x1,   sy),   # Phải: canh
-
-        # Hàng DƯỚI: 3 ô nhỏ đều nhau
-        "o1" : cut(x0,           sy, x0+w3,    y1),
-        "o2" : cut(x0+w3,        sy, x0+w3*2,  y1),
-        "o3" : cut(x0+w3*2,      sy, x1,       y1),
+        "o4_com"  : cut(x0,        y0, mid,       sy),
+        "o5_canh" : cut(mid,        y0, x1,        sy),
+        "o1"      : cut(x0,         sy, x0+w3,     y1),
+        "o2"      : cut(x0+w3,      sy, x0+w3*2,   y1),
+        "o3"      : cut(x0+w3*2,    sy, x1,         y1),
     }
 
-def draw_grid(warped_img, ratios=RATIOS):
-    """Vẽ lưới 5 ô lên ảnh khay đã làm thẳng — dùng cho video stream xem trực quan."""
-    vis = warped_img.copy()
-    H, W = vis.shape[:2]
-    r = ratios
-    color = (80, 220, 80)
-    th = 3
-    cv2.line(vis, (0, int(H * r["top_h"])), (W, int(H * r["top_h"])), color, th)
-    cv2.line(vis, (int(W * r["col1"]), 0), (int(W * r["col1"]), int(H * r["top_h"])), color, th)
-    cv2.line(vis, (int(W * r["col2"]), 0), (int(W * r["col2"]), int(H * r["top_h"])), color, th)
-    cv2.line(vis, (int(W * r["rice_w"]), int(H * r["top_h"])), (int(W * r["rice_w"]), H), color, th)
-    cv2.line(vis, (int(W * r["strip_w"]), int(H * r["top_h"])), (int(W * r["strip_w"]), H), color, th)
-    return vis
+
+# ── Hàm lấy xác suất từ ResNet50 ────────────────────────────
+def get_probs(crop_img):
+    if crop_img.size == 0:
+        return np.ones(NUM_CLASSES) / NUM_CLASSES
+    img_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
+    img_pil = Image.fromarray(img_rgb)
+    tensor  = transform(img_pil).unsqueeze(0).to(device)
+    with torch.no_grad():
+        outputs = resnet_model(tensor)
+        probs   = torch.softmax(outputs, dim=1)[0]
+    return probs.cpu().numpy()
 
 
-def find_food_box_in_cell(cell_img):
-    """
-    Chạy YOLO trên 1 ô nhỏ đã cắt (không phải cả khung hình) để tìm
-    vị trí món ăn chính xác trong ô đó, rồi crop sát theo box đó.
-    Vì vùng tìm đã giới hạn trong 1 ô, sẽ không bị ra "một đống" box
-    như khi chạy YOLO trên cả khung hình to.
-
-    Trả về ảnh đã crop sát món ăn. Nếu YOLO không tìm thấy gì
-    (ô trống / conf quá thấp) -> trả về nguyên ô gốc (fallback).
-    """
-    if cell_img.size == 0:
-        return cell_img
-
-    results = yolo_model(cell_img, conf=YOLO_CONF_IN_CELL, imgsz=320, verbose=False)[0]
-
-    if len(results.boxes) == 0:
-        return cell_img  # không thấy món -> dùng nguyên ô (ResNet sẽ tự đánh giá conf)
-
-    # Lấy box có confidence cao nhất trong ô
-    best_box = max(results.boxes, key=lambda b: float(b.conf[0]))
-    x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
-
-    h, w = cell_img.shape[:2]
-    x1 = max(0, x1 - YOLO_BOX_PAD)
-    y1 = max(0, y1 - YOLO_BOX_PAD)
-    x2 = min(w, x2 + YOLO_BOX_PAD)
-    y2 = min(h, y2 + YOLO_BOX_PAD)
-
-    crop = cell_img[y1:y2, x1:x2]
-    return crop if crop.size > 0 else cell_img
-
-def dem_so_mieng_thit(crop_img, min_area_ratio=0.03):
-    """
-    Đếm số 'miếng' riêng biệt trong ảnh đã crop, dựa vào contour.
-    Dùng để phân biệt:
-      - Sườn nướng: thường 1 (hoặc rất ít) miếng nguyên, to
-      - Thịt kho  : thường nhiều miếng nhỏ rời rạc
-    """
+# ── Đếm số miếng để phân biệt Sườn vs Thịt kho ─────────────
+def dem_so_mieng(crop_img, min_area_ratio=0.03):
     if crop_img.size == 0:
         return 1
     gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
@@ -295,140 +170,85 @@ def dem_so_mieng_thit(crop_img, min_area_ratio=0.03):
     so_mieng = sum(1 for c in contours if cv2.contourArea(c) > total_area * min_area_ratio)
     return max(so_mieng, 1)
 
-# ── Biến toàn cục ────────────────────────────────────────────
-camera        = cv2.VideoCapture(0)
-current_frame = None
-frame_lock    = threading.Lock()
-ket_qua       = {"hoa_don": {}, "tong_tien": 0, "so_mon": 0}
 
-# ── Thread đọc camera liên tục (hiển thị khay đã làm thẳng + lưới 5 ô) ─
-def doc_camera():
-    global current_frame
-    while True:
-        ret, frame = camera.read()
-        if not ret:
-            continue
-        try:
-            corners = get_tray_corners(frame)
-            warped = warp_tray(frame, corners)
-            annotated = draw_grid(warped)
-        except Exception:
-            annotated = frame  # chưa thấy khay -> hiện ảnh gốc
-        with frame_lock:
-            current_frame = annotated.copy()
-
-
-camera_thread = threading.Thread(target=doc_camera, daemon=True)
-camera_thread.start()
-
-# ── Hàm nhận diện món trong 1 ô ───────────────────────────────
-def classify_dish(crop_img):
-    img_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(img_rgb)
-    tensor  = transform(img_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        outputs = resnet_model(tensor)
-        probs   = torch.softmax(outputs, dim=1)
-        conf, pred = torch.max(probs, 1)
-    return idx_to_class[pred.item()], conf.item()
-
-
-def get_probs(crop_img):
-    """Trả về vector xác suất CHO TẤT CẢ class (không chỉ top-1) —
-    dùng để giải bài toán gán không trùng nhãn giữa các ô."""
-    img_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(img_rgb)
-    tensor  = transform(img_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        outputs = resnet_model(tensor)
-        probs   = torch.softmax(outputs, dim=1)[0]
-    return probs.cpu().numpy()
-
-
+# ── Phân loại 5 ô ────────────────────────────────────────────
 def phan_loai_5_o(crops):
-    """
-    Ràng buộc:
-    - o4_com hoặc o5_canh → 1 ô là Cơm trắng, 1 ô là Canh (chua/rau)
-    - o1, o2, o3 → 3 món khác nhau, không phải cơm/canh
-    """
-    all_cells = ["o1", "o2", "o3", "o4_com", "o5_canh"]
-    big_cells  = ["o4_com", "o5_canh"]
+    all_cells   = ["o1", "o2", "o3", "o4_com", "o5_canh"]
+    big_cells   = ["o4_com", "o5_canh"]
     small_cells = ["o1", "o2", "o3"]
 
-# Lấy probs cho cả 5 ô
+    # Lấy probs cho cả 5 ô
     cell_probs = {}
-    cell_crops_food = {}          # lưu lại ảnh đã crop sát món, dùng để đếm số miếng
     for ten_o in all_cells:
-        food_crop = find_food_box_in_cell(crops[ten_o])
-        cell_probs[ten_o] = get_probs(food_crop)
-        cell_crops_food[ten_o] = food_crop
+        cell_probs[ten_o] = get_probs(crops[ten_o]).copy()
 
-    # ── Xác định ô cơm và ô canh trong 2 ô lớn ──────────────
-    # So sánh xác suất cơm giữa 2 ô lớn → ô nào cao hơn là cơm
-    rice_cell  = max(big_cells, key=lambda c: cell_probs[c][RICE_IDX])
-    soup_cell  = big_cells[1] if rice_cell == big_cells[0] else big_cells[0]
+    # ── Bước 1: Xác định ô cơm và ô canh ────────────────────
+    rice_cell = max(big_cells, key=lambda c: cell_probs[c][RICE_IDX])
+    soup_cell = [c for c in big_cells if c != rice_cell][0]
 
-    ket_qua_5_o = {}
+    ket_qua_5_o = {
+        rice_cell: (RICE_LABEL, float(cell_probs[rice_cell][RICE_IDX])),
+    }
 
-    # Ô cơm: luôn là cơm trắng
-    ket_qua_5_o[rice_cell] = (RICE_LABEL, float(cell_probs[rice_cell][RICE_IDX]))
-
-    # Ô canh: chọn giữa canh chua / canh rau (không được là cơm)
     best_soup_idx = max(SOUP_INDICES, key=lambda i: cell_probs[soup_cell][i])
     ket_qua_5_o[soup_cell] = (
         idx_to_class[best_soup_idx],
         float(cell_probs[soup_cell][best_soup_idx])
     )
 
-    # ── Ràng buộc: Thịt kho và Thịt kho trứng không cùng xuất hiện ──
-    # -> chỉ giữ loại nào có xác suất cao nhất (ở bất kỳ ô nào trong 3 ô nhỏ)
-    max_thit_kho       = max(cell_probs[c][idx_thit_kho] for c in small_cells)
-    max_thit_kho_trung = max(cell_probs[c][idx_thit_kho_trung] for c in small_cells)
-
-    if max_thit_kho >= max_thit_kho_trung:
-        idx_loai_bo = idx_thit_kho_trung   # bỏ "thịt kho trứng" khỏi danh sách ứng viên
-    else:
-        idx_loai_bo = idx_thit_kho          # bỏ "thịt kho" khỏi danh sách ứng viên
-
-    active_other_indices = [idx for idx in OTHER_INDICES if idx != idx_loai_bo]
-
-# ── Heuristic: đếm số miếng để chỉnh lại xác suất Sườn nướng vs Thịt kho ──
-    # 1 miếng to -> tăng khả năng Sườn nướng, giảm Thịt kho
-    # nhiều miếng nhỏ -> tăng khả năng Thịt kho, giảm Sườn nướng
+    # ── Bước 2: Heuristic đếm miếng cho 3 ô nhỏ ─────────────
     for ten_o in small_cells:
-        so_mieng = dem_so_mieng_thit(cell_crops_food[ten_o])
-        probs = cell_probs[ten_o]
-        if so_mieng <= 1:
-            probs[idx_suon_nuong] *= 4.0
-            probs[idx_thit_kho]   *= 0.3
-        elif so_mieng >= 3:
-            probs[idx_thit_kho]   *= 1.5
-            probs[idx_suon_nuong] *= 0.5
-        print(f"    🔍 {ten_o}: đếm được {so_mieng} miếng -> "
-              f"sườn nướng={probs[idx_suon_nuong]:.3f}, thịt kho={probs[idx_thit_kho]:.3f}")
+        so_mieng = dem_so_mieng(crops[ten_o])
+        probs    = cell_probs[ten_o]
 
-    # ── 3 ô nhỏ: gán không trùng nhau, không phải cơm/canh, không vi phạm ràng buộc trên ──
+        if so_mieng == 1:
+            probs[idx_suon_nuong]    *= 3.5
+            probs[idx_thit_kho]      *= 0.4
+            probs[idx_thit_kho_trung]*= 0.5
+        elif so_mieng == 2:
+            probs[idx_thit_kho_trung]*= 3.0
+            probs[idx_thit_kho]      *= 0.5
+            probs[idx_suon_nuong]    *= 0.5
+        elif so_mieng >= 3:
+            probs[idx_thit_kho]      *= 1.5
+            probs[idx_suon_nuong]    *= 0.3
+            probs[idx_thit_kho_trung]*= 0.8
+
+        # Giảm trứng chiên
+        probs[idx_trung_chien] *= 0.2
+
+        print(f"    🔍 {ten_o}: {so_mieng} miếng | "
+              f"sườn={probs[idx_suon_nuong]:.3f} "
+              f"thịt kho trứng={probs[idx_thit_kho_trung]:.3f} "
+              f"thịt kho={probs[idx_thit_kho]:.3f}")
+
+    # ── Bước 3: Loại bỏ 1 trong 2 (thịt kho / thịt kho trứng) ──
+    max_thit_kho       = max(cell_probs[c][idx_thit_kho]       for c in small_cells)
+    max_thit_kho_trung = max(cell_probs[c][idx_thit_kho_trung] for c in small_cells)
+    idx_loai_bo = idx_thit_kho_trung if max_thit_kho >= max_thit_kho_trung else idx_thit_kho
+    active_other = [idx for idx in OTHER_INDICES if idx != idx_loai_bo]
+
+    # ── Bước 4: Gán 3 ô nhỏ không trùng nhau ────────────────
     prob_matrix = np.array([
-        [cell_probs[c][idx] for idx in active_other_indices]
+        [cell_probs[c][idx] for idx in active_other]
         for c in small_cells
     ])
     row_idx, col_idx = linear_sum_assignment(-prob_matrix)
 
     for r, c in zip(row_idx, col_idx):
         ten_o     = small_cells[r]
-        class_idx = active_other_indices[c]
+        class_idx = active_other[c]
         ket_qua_5_o[ten_o] = (
             idx_to_class[class_idx],
             float(prob_matrix[r, c])
         )
- 
-# ── DEBUG: in top-3 khả năng của mỗi ô để chẩn đoán ──
-    print("\n  📊 Top-3 khả năng mỗi ô:")
+
+    # ── Debug ─────────────────────────────────────────────────
+    print("\n  📊 Top-3 mỗi ô:")
     for ten_o in all_cells:
-        probs = cell_probs[ten_o]
-        top3 = sorted(enumerate(probs), key=lambda x: -x[1])[:3]
-        ten_top3 = [(idx_to_class[i], round(p, 3)) for i, p in top3]
-        print(f"    {ten_o}: {ten_top3}")
+        top3 = sorted(enumerate(cell_probs[ten_o]), key=lambda x: -x[1])[:3]
+        print(f"    {ten_o}: {[(idx_to_class[i], round(p,3)) for i,p in top3]}")
+
     return ket_qua_5_o
 
 
@@ -436,16 +256,14 @@ def phan_loai_5_o(crops):
 def tinh_tien(danh_sach_mon):
     hoa_don = {}
     for mon in danh_sach_mon:
-        mon_chuan = unicodedata.normalize('NFC', mon.strip())
+        mon_chuan = _chuan_hoa(mon)
         gia = 0
         ten_chuan = mon_chuan
         for key, price in MENU_PRICES.items():
-            key_chuan = unicodedata.normalize('NFC', key.strip())
-            if mon_chuan == key_chuan:
+            if mon_chuan == _chuan_hoa(key):
                 gia = price
                 ten_chuan = key
                 break
-
         if ten_chuan in hoa_don:
             hoa_don[ten_chuan]["so_luong"]  += 1
             hoa_don[ten_chuan]["thanh_tien"] += gia
@@ -458,12 +276,33 @@ def tinh_tien(danh_sach_mon):
     tong_tien = sum(v["thanh_tien"] for v in hoa_don.values())
     return hoa_don, tong_tien
 
-# ── Route: Trang chính ───────────────────────────────────────
+
+# ── Biến toàn cục ────────────────────────────────────────────
+camera        = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+current_frame = None
+frame_lock    = threading.Lock()
+
+
+def doc_camera():
+    global current_frame
+    while True:
+        ret, frame = camera.read()
+        if not ret:
+            continue
+        with frame_lock:
+            current_frame = frame.copy()
+
+
+camera_thread = threading.Thread(target=doc_camera, daemon=True)
+camera_thread.start()
+
+
+# ── Routes Flask ─────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
 
-# ── Route: Stream camera ─────────────────────────────────────
+
 def generate_frames():
     while True:
         with frame_lock:
@@ -477,6 +316,7 @@ def generate_frames():
                b'Content-Type: image/jpeg\r\n\r\n' +
                buffer.tobytes() + b'\r\n')
 
+
 @app.route("/video_feed")
 def video_feed():
     return Response(
@@ -484,41 +324,14 @@ def video_feed():
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
 
-@app.route("/debug_grid")
-def debug_grid_route():
-    """Route riêng để xem lưới 5 ô — chỉ dùng để canh chỉnh RATIOS, không ảnh hưởng app chính."""
-    ret, frame = camera.read()
-    if not ret:
-        return "Không đọc được camera", 500
-    try:
-        corners = get_tray_corners(frame)
-        warped = warp_tray(frame, corners)
-        annotated = draw_grid(warped)
-    except Exception as e:
-        return f"Lỗi tìm khay: {e}", 500
-    ret, buffer = cv2.imencode('.jpg', annotated)
-    return Response(buffer.tobytes(), mimetype='image/jpeg')
 
-
-# ── Route: Nhận diện khi nhấn nút ───────────────────────────
 @app.route("/nhan_dien", methods=["POST"])
 def nhan_dien():
-    global ket_qua
-
     ret, raw_frame = camera.read()
     if not ret:
         return jsonify({"hoa_don": {}, "tong_tien": 0, "so_mon": 0})
 
-    try:
-        corners = get_tray_corners(raw_frame)
-        warped = warp_tray(raw_frame, corners)
-    except Exception as e:
-        print("⚠️ Không tìm thấy khay:", e)
-        return jsonify({"hoa_don": {}, "tong_tien": 0, "so_mon": 0})
-
-    crops = crop_5_compartments(warped)
-
-    # Vì khay LUÔN có đúng 5 món không trùng nhau, và ô cơm luôn là cơm trắng
+    crops       = crop_5_compartments(raw_frame)
     ket_qua_5_o = phan_loai_5_o(crops)
 
     danh_sach_mon = []
@@ -527,16 +340,15 @@ def nhan_dien():
         print(f"  🍽️  {ten_o}: {ten_mon} ({conf:.1%})")
 
     hoa_don, tong_tien = tinh_tien(danh_sach_mon)
-    ket_qua = {
+    print(f"  💰 Tổng tiền: {tong_tien:,}đ")
+
+    return jsonify({
         "hoa_don"  : hoa_don,
         "tong_tien": tong_tien,
         "so_mon"   : len(danh_sach_mon)
-    }
+    })
 
-    print(f"  💰 Tổng tiền: {tong_tien:,}đ")
-    return jsonify(ket_qua)
 
-# ── Chạy server ──────────────────────────────────────────────
 if __name__ == "__main__":
     print("\n🌐 Mở trình duyệt vào: http://127.0.0.1:5000")
     app.run(debug=False, threaded=True)
