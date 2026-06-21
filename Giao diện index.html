@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canteen - Nhận diện món ăn</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+        --pink-deep:   #d6788a;
+        --pink-mid:    #ef9fb0;
+        --pink-soft:   #fcd9e3;
+        --pink-pale:   #ffeef3;
+        --cream:       #fffaf6;
+        --text-dark:   #6b3f4a;
+        --text-muted:  #b083a3;
+        --green-mint:  #4fb594;
+        --gold:        #e8b84b;
+        --line:        #f3c4d3;
+        --shadow-pink: rgba(214, 120, 138, 0.22);
+    }
+
+    body {
+        font-family: 'Trebuchet MS', 'Segoe UI', sans-serif;
+        min-height: 100vh;
+        background-color: var(--pink-pale);
+        background-image:
+            radial-gradient(circle at 6% 12%, rgba(255,255,255,0.9) 0, transparent 12%),
+            radial-gradient(circle at 94% 18%, rgba(255,255,255,0.75) 0, transparent 14%),
+            radial-gradient(circle at 12% 92%, rgba(255,255,255,0.6) 0, transparent 16%),
+            radial-gradient(circle at 92% 88%, rgba(255,255,255,0.6) 0, transparent 14%),
+            repeating-radial-gradient(circle at 50% 50%, rgba(214,120,138,0.05) 0px, transparent 2px, transparent 26px),
+            linear-gradient(160deg, #ffe3ec 0%, #ffd6e4 28%, #ffeaf1 55%, #ffd9e8 100%);
+        color: var(--text-dark);
+        padding: 22px;
+        position: relative;
+        overflow-x: hidden;
+    }
+
+    .bg-deco { position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: 0.55; }
+    .bg-deco span {
+        position: absolute; font-size: 26px; opacity: 0.35;
+        filter: drop-shadow(0 2px 2px rgba(214,120,138,0.15));
+    }
+
+    .header { text-align: center; margin-bottom: 22px; position: relative; z-index: 1; }
+    .header-badge {
+        display: inline-flex; align-items: center; gap: 10px;
+        background: linear-gradient(135deg, #fff, var(--cream));
+        border: 2px solid var(--pink-soft);
+        border-radius: 999px;
+        padding: 10px 28px;
+        box-shadow: 0 6px 0 var(--pink-soft), 0 10px 22px var(--shadow-pink);
+    }
+    .header h1 { font-size: 23px; letter-spacing: 0.5px; color: var(--pink-deep); font-weight: 800; text-shadow: 1px 1px 0 #fff; }
+    .header p { font-size: 13px; color: var(--text-muted); margin-top: 8px; font-weight: 600; }
+    .header .deco-icon { width: 30px; height: 30px; }
+
+    .main-layout {
+        display: grid;
+        grid-template-columns: 1fr 1.35fr 1fr;
+        gap: 22px;
+        max-width: 1320px;
+        margin: 0 auto;
+        align-items: stretch;
+        position: relative;
+        z-index: 1;
+    }
+
+    .panel {
+        background: linear-gradient(160deg, #fffdfb 0%, var(--cream) 100%);
+        border: 3px solid #fff;
+        outline: 2px solid var(--pink-soft);
+        outline-offset: -2px;
+        border-radius: 26px;
+        padding: 22px;
+        box-shadow: 0 14px 0 -6px var(--pink-soft), 0 18px 30px var(--shadow-pink);
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .panel-corner { position: absolute; width: 70px; height: 70px; opacity: 0.9; pointer-events: none; }
+    .panel-corner.tl { top: -8px; left: -8px; transform: rotate(-8deg); }
+    .panel-corner.br { bottom: -10px; right: -10px; transform: rotate(10deg) scaleX(-1); }
+
+    .panel-title {
+        font-size: 15px; font-weight: 800; color: var(--pink-deep);
+        letter-spacing: 0.4px; padding-bottom: 12px; margin-bottom: 16px;
+        border-bottom: 3px dashed var(--pink-soft);
+        display: flex; align-items: center; gap: 9px; z-index: 2;
+    }
+    .panel-title .tag {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 30px; height: 30px; background: var(--pink-soft); border-radius: 50%;
+        font-size: 15px; flex-shrink: 0;
+    }
+
+    .order-panel { justify-content: space-between; }
+
+    .hoa-don-table { width: 100%; font-size: 14px; border-collapse: collapse; z-index: 2; }
+    .hoa-don-table thead th {
+        text-align: left; color: var(--text-muted); font-weight: 700;
+        font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; padding-bottom: 8px;
+    }
+    .hoa-don-table thead th:nth-child(2) { text-align: center; }
+    .hoa-don-table thead th:last-child { text-align: right; }
+    .hoa-don-table tbody td { padding: 9px 0; border-bottom: 2px dotted var(--pink-soft); color: var(--text-dark); font-weight: 600; }
+    .hoa-don-table tbody td:nth-child(2) { text-align: center; color: var(--text-muted); }
+    .hoa-don-table tbody td:last-child { text-align: right; font-weight: 800; color: var(--green-mint); }
+
+    .empty-row td { text-align: center !important; color: #d9b8c5 !important; font-weight: 600 !important; padding: 26px 0 14px !important; border-bottom: none !important; }
+    .empty-state { display: flex; flex-direction: column; align-items: center; gap: 6px; z-index: 2;}
+    .empty-state svg { width: 70px; height: 70px; opacity: 0.85; }
+
+    .mascots-row { display: flex; justify-content: space-around; align-items: flex-end; margin: 16px 0 6px; z-index: 2; }
+    .mascots-row svg { width: 58px; height: 58px; transition: transform 0.25s; filter: drop-shadow(0 3px 4px rgba(214,120,138,0.25)); }
+    .mascots-row svg:hover { transform: translateY(-6px) rotate(-4deg); }
+
+    .total-row {
+        z-index: 2; margin-top: 14px; padding: 14px 16px; border-radius: 16px;
+        background: linear-gradient(135deg, var(--pink-soft), #ffe0ea);
+        display: flex; align-items: center; justify-content: space-between; border: 2px solid #fff;
+    }
+    .total-label { font-size: 14px; font-weight: 800; color: var(--text-dark); }
+    .total-value { font-size: 26px; font-weight: 800; color: var(--pink-deep); }
+
+    .camera-panel { align-items: center; justify-content: flex-start; padding: 22px; }
+    .camera-frame {
+        position: relative; z-index: 2; width: 100%; border-radius: 20px; overflow: hidden;
+        border: 5px solid #fff; outline: 3px solid var(--pink-mid); background: #1c1414;
+        display: flex; align-items: center; justify-content: center; min-height: 300px;
+        box-shadow: 0 8px 20px rgba(214,120,138,0.18);
+    }
+    .camera-frame::after {
+        content: '📷 LIVE'; position: absolute; top: 10px; left: 12px;
+        background: rgba(255,255,255,0.92); color: var(--pink-deep); font-size: 11px;
+        font-weight: 800; padding: 4px 10px; border-radius: 999px; letter-spacing: 0.5px;
+    }
+    .camera-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+    .btn-nhan-dien {
+        z-index: 2; margin-top: 20px; width: 100%; padding: 15px; border: none; border-radius: 16px;
+        font-size: 15px; font-weight: 800; letter-spacing: 0.3px; color: #fff; cursor: pointer;
+        background: linear-gradient(135deg, #ff9bb3, var(--pink-deep));
+        box-shadow: 0 5px 0 #b85a6c, 0 10px 18px var(--shadow-pink);
+        transition: transform 0.12s, box-shadow 0.12s;
+    }
+    .btn-nhan-dien:hover { transform: translateY(-2px); box-shadow: 0 7px 0 #b85a6c, 0 14px 22px var(--shadow-pink); }
+    .btn-nhan-dien:active { transform: translateY(3px); box-shadow: 0 2px 0 #b85a6c; }
+    .btn-nhan-dien:disabled { background: #e8d6dc; color: #fff; cursor: not-allowed; box-shadow: none; transform: none; }
+
+    .status { z-index: 2; font-size: 13px; color: var(--text-muted); margin-top: 12px; text-align: center; font-weight: 600; }
+
+    .camera-deco-row { display: flex; justify-content: center; gap: 18px; margin-top: 16px; z-index: 2; }
+    .camera-deco-row svg { width: 42px; height: 42px; opacity: 0.9; }
+
+    .payment-panel { align-items: center; text-align: center; }
+    .payment-panel .panel-title { width: 100%; }
+
+    .qr-card {
+        z-index: 2; background: #fff; border: 3px solid var(--pink-soft); border-radius: 20px;
+        padding: 18px 20px 16px; width: 100%; max-width: 250px;
+        box-shadow: 0 8px 0 -3px var(--pink-soft), 0 10px 20px var(--shadow-pink);
+        position: relative;
+    }
+    .qr-card::before, .qr-card::after { content: '✿'; position: absolute; color: var(--pink-mid); font-size: 16px; }
+    .qr-card::before { top: 8px; left: 10px; }
+    .qr-card::after { bottom: 8px; right: 10px; }
+
+    .bank-name { display: flex; align-items: center; justify-content: center; gap: 6px; font-weight: 800; color: #006a4e; font-size: 16px; margin-bottom: 10px; }
+    .qr-card img { width: 100%; max-width: 190px; display: block; margin: 0 auto; border: 2px solid var(--pink-pale); border-radius: 10px; padding: 6px; }
+    .qr-card .bank-sub { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 8px; padding: 0 4px; font-weight: 700; }
+    .account-name { margin-top: 12px; font-size: 13px; font-weight: 800; color: var(--text-dark); letter-spacing: 0.3px; }
+    .account-id { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; font-weight: 600; }
+
+    .btn-thanh-toan {
+        z-index: 2; margin-top: 20px; width: 100%; padding: 15px; border: none; border-radius: 16px;
+        font-size: 15px; font-weight: 800; letter-spacing: 0.5px; color: #fff; cursor: pointer;
+        background: linear-gradient(135deg, #ff9bb3, var(--pink-deep));
+        box-shadow: 0 5px 0 #b85a6c, 0 10px 18px var(--shadow-pink);
+        transition: transform 0.12s, box-shadow 0.12s;
+    }
+    .btn-thanh-toan:hover { transform: translateY(-2px); box-shadow: 0 7px 0 #b85a6c, 0 14px 22px var(--shadow-pink); }
+    .btn-thanh-toan:active { transform: translateY(3px); box-shadow: 0 2px 0 #b85a6c; }
+
+    .payment-deco-row { display: flex; justify-content: space-around; width: 100%; margin-top: auto; padding-top: 16px; z-index: 2; }
+    .payment-deco-row svg { width: 46px; height: 46px; }
+
+    @media (max-width: 980px) {
+        .main-layout { grid-template-columns: 1fr; }
+        .header-badge { padding: 8px 18px; }
+    }
+</style>
+</head>
+<body>
+
+<div class="bg-deco">
+    <span style="top:6%; left:4%;">🌸</span>
+    <span style="top:14%; left:88%;">🍙</span>
+    <span style="top:40%; left:2%;">🥢</span>
+    <span style="top:70%; left:6%;">🍡</span>
+    <span style="top:85%; left:90%;">🌸</span>
+    <span style="top:55%; left:95%;">🍵</span>
+    <span style="top:92%; left:45%;">🌸</span>
+    <span style="top:3%; left:48%;">🍡</span>
+</div>
+
+<div class="header">
+    <div class="header-badge">
+        <svg class="deco-icon" viewBox="0 0 100 100"><g>
+            <ellipse cx="50" cy="70" rx="34" ry="20" fill="#fff" stroke="#d6788a" stroke-width="3"/>
+            <ellipse cx="50" cy="62" rx="26" ry="14" fill="#fff4f6"/>
+            <path d="M30 60 Q50 50 70 60" stroke="#ef9fb0" stroke-width="2" fill="none" stroke-linecap="round"/>
+        </g></svg>
+        <div>
+            <h1>HỆ THỐNG NHẬN DIỆN MÓN ĂN CANTEEN</h1>
+            <p>🍴 Đưa khay cơm vào camera → Nhấn Nhận Diện → Thanh toán 🍴</p>
+        </div>
+        <svg class="deco-icon" viewBox="0 0 100 100"><g>
+            <ellipse cx="50" cy="70" rx="34" ry="20" fill="#fff" stroke="#d6788a" stroke-width="3"/>
+            <ellipse cx="50" cy="62" rx="26" ry="14" fill="#fff4f6"/>
+            <path d="M30 60 Q50 50 70 60" stroke="#ef9fb0" stroke-width="2" fill="none" stroke-linecap="round"/>
+        </g></svg>
+    </div>
+</div>
+
+<div class="main-layout">
+
+    <div class="panel order-panel">
+        <svg class="panel-corner tl" viewBox="0 0 100 100">
+            <ellipse cx="50" cy="62" rx="32" ry="20" fill="#fbe7ef"/>
+            <ellipse cx="50" cy="54" rx="26" ry="15" fill="#fffaf6"/>
+        </svg>
+
+        <div class="panel-title"><span class="tag">📋</span>Chi Tiết Đơn Hàng</div>
+
+        <table class="hoa-don-table">
+            <thead><tr><th>Món ăn</th><th>SL</th><th>Thành tiền</th></tr></thead>
+            <tbody id="hoa-don-body">
+                <tr class="empty-row">
+                    <td colspan="3">
+                        <div class="empty-state">
+                            <svg viewBox="0 0 100 100">
+                                <ellipse cx="50" cy="70" rx="36" ry="20" fill="#ffe3ec" stroke="#ef9fb0" stroke-width="3"/>
+                                <ellipse cx="50" cy="60" rx="28" ry="14" fill="#fffaf6"/>
+                                <circle cx="42" cy="58" r="2.3" fill="#6b3f4a"/>
+                                <circle cx="58" cy="58" r="2.3" fill="#6b3f4a"/>
+                                <path d="M44 64 Q50 67 56 64" stroke="#6b3f4a" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+                            </svg>
+                            Chưa có món nào...
+                        </div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="mascots-row">
+            <svg viewBox="0 0 100 100"><g>
+                <ellipse cx="50" cy="72" rx="36" ry="20" fill="#aee0f0" stroke="#7fc4dd" stroke-width="2"/>
+                <ellipse cx="50" cy="60" rx="29" ry="17" fill="#fdfdfd"/>
+                <circle cx="40" cy="56" r="2.4" fill="#5b4543"/>
+                <circle cx="58" cy="56" r="2.4" fill="#5b4543"/>
+                <ellipse cx="40" cy="62" rx="3.2" ry="1.9" fill="#f4a6a6"/>
+                <ellipse cx="58" cy="62" rx="3.2" ry="1.9" fill="#f4a6a6"/>
+                <path d="M44 61 Q50 66 56 61" stroke="#5b4543" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+            </g></svg>
+            <svg viewBox="0 0 100 100"><g>
+                <ellipse cx="50" cy="74" rx="22" ry="22" fill="#b5651d"/>
+                <ellipse cx="50" cy="64" rx="22" ry="18" fill="#cf8540"/>
+                <circle cx="41" cy="60" r="2.3" fill="#3a2616"/>
+                <circle cx="59" cy="60" r="2.3" fill="#3a2616"/>
+                <ellipse cx="41" cy="66" rx="3.2" ry="1.9" fill="#f4a6a6"/>
+                <ellipse cx="59" cy="66" rx="3.2" ry="1.9" fill="#f4a6a6"/>
+                <path d="M44 65 Q50 70 56 65" stroke="#3a2616" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+            </g></svg>
+            <svg viewBox="0 0 100 100"><g>
+                <ellipse cx="50" cy="74" rx="34" ry="18" fill="#fff" stroke="#9fd6a6" stroke-width="2.5"/>
+                <ellipse cx="50" cy="64" rx="26" ry="13" fill="#e9f7ea"/>
+                <ellipse cx="38" cy="58" rx="6" ry="4" fill="#5cad6a"/>
+                <ellipse cx="60" cy="56" rx="5" ry="4" fill="#5cad6a"/>
+                <circle cx="40" cy="70" r="2.2" fill="#3a4a3c"/>
+                <circle cx="58" cy="70" r="2.2" fill="#3a4a3c"/>
+                <path d="M43 75 Q50 79 57 75" stroke="#3a4a3c" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+            </g></svg>
+        </div>
+
+        <div class="total-row">
+            <span class="total-label">💰 Tổng cộng</span>
+            <span class="total-value" id="tong-tien">0 VND</span>
+        </div>
+    </div>
+
+    <div class="panel camera-panel">
+        <div class="panel-title" style="width:100%; justify-content:center;">
+            <span class="tag">📷</span>Camera Nhận Diện
+        </div>
+
+        <div class="camera-frame">
+            <img src="/video_feed" alt="Camera Feed">
+        </div>
+
+        <button class="btn-nhan-dien" id="btn-nhan-dien" onclick="nhanDien()">
+            📸 Nhận Diện Món Ăn
+        </button>
+        <div class="status" id="status">✨ Sẵn sàng...</div>
+
+        <div class="camera-deco-row">
+            <svg viewBox="0 0 100 100"><g>
+                <ellipse cx="50" cy="76" rx="22" ry="14" fill="#f3d49a" stroke="#dba84e" stroke-width="2"/>
+                <circle cx="50" cy="56" r="20" fill="#fff6e6" stroke="#dba84e" stroke-width="2"/>
+                <circle cx="43" cy="54" r="1.8" fill="#5b4030"/>
+                <circle cx="57" cy="54" r="1.8" fill="#5b4030"/>
+                <path d="M45 60 Q50 63 55 60" stroke="#5b4030" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+            </g></svg>
+            <svg viewBox="0 0 100 100"><g>
+                <path d="M30 78 Q50 30 70 78 Z" fill="#c9826a"/>
+                <ellipse cx="50" cy="78" rx="22" ry="6" fill="#a8654f"/>
+                <circle cx="44" cy="55" r="1.8" fill="#fff"/>
+                <circle cx="56" cy="55" r="1.8" fill="#fff"/>
+                <path d="M46 62 Q50 65 54 62" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+            </g></svg>
+            <svg viewBox="0 0 100 100"><g>
+                <path d="M30 50 Q30 30 50 30 Q70 30 70 50 L66 80 Q50 86 34 80 Z" fill="#fff2d6" stroke="#e3b65c" stroke-width="2"/>
+                <path d="M38 78 L36 86 M62 78 L64 86" stroke="#e3b65c" stroke-width="3" stroke-linecap="round"/>
+                <circle cx="42" cy="48" r="1.8" fill="#5b4030"/>
+                <circle cx="58" cy="48" r="1.8" fill="#5b4030"/>
+                <path d="M45 54 Q50 57 55 54" stroke="#5b4030" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+            </g></svg>
+        </div>
+    </div>
+
+    <div class="panel payment-panel">
+        <svg class="panel-corner br" viewBox="0 0 100 100">
+            <path d="M30 50 Q30 30 50 30 Q70 30 70 50 L66 80 Q50 86 34 80 Z" fill="#fbe7ef"/>
+        </svg>
+
+        <div class="panel-title"><span class="tag">💳</span>Thanh Toán</div>
+
+        <div class="qr-card">
+            <div class="bank-name">🏦 Vietcombank</div>
+            <img src="/static/qr_code.png" alt="QR Code">
+            <div class="bank-sub"><span>VietQR</span><span>Canteen247</span></div>
+            <div class="account-name" id="account-name">CANTEEN NHÀ TRƯỜNG</div>
+            <div class="account-id" id="account-id">Quét mã để thanh toán</div>
+        </div>
+
+        <button class="btn-thanh-toan" onclick="thanhToan()">
+            THANH TOÁN NGAY ✨
+        </button>
+
+        <div class="payment-deco-row">
+            <svg viewBox="0 0 100 100"><g>
+                <ellipse cx="50" cy="72" rx="26" ry="22" fill="#fff" stroke="#ef9fb0" stroke-width="3"/>
+                <path d="M30 60 Q50 70 70 60" stroke="#ef9fb0" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+                <circle cx="42" cy="58" r="2" fill="#6b3f4a"/>
+                <circle cx="58" cy="58" r="2" fill="#6b3f4a"/>
+                <ellipse cx="42" cy="63" rx="2.8" ry="1.6" fill="#f4a6a6"/>
+                <ellipse cx="58" cy="63" rx="2.8" ry="1.6" fill="#f4a6a6"/>
+            </g></svg>
+            <svg viewBox="0 0 100 100"><g>
+                <circle cx="50" cy="60" r="26" fill="#fdebc8" stroke="#e3b65c" stroke-width="2.5"/>
+                <ellipse cx="50" cy="86" rx="32" ry="5" fill="#e3b65c" opacity="0.4"/>
+                <circle cx="42" cy="56" r="2" fill="#5b4030"/>
+                <circle cx="58" cy="56" r="2" fill="#5b4030"/>
+                <path d="M45 63 Q50 66 55 63" stroke="#5b4030" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+            </g></svg>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    function formatVND(n) {
+        return n.toLocaleString('vi-VN') + ' VND';
+    }
+
+    function nhanDien() {
+        const btn = document.getElementById('btn-nhan-dien');
+        const status = document.getElementById('status');
+
+        btn.disabled = true;
+        status.textContent = '⏳ Đang nhận diện...';
+
+        fetch('/nhan_dien', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                const tbody = document.getElementById('hoa-don-body');
+
+                if (data.hoa_don && Object.keys(data.hoa_don).length > 0) {
+                    let html = '';
+                    for (const [mon, info] of Object.entries(data.hoa_don)) {
+                        html += `<tr>
+                            <td>${mon}</td>
+                            <td>${info.so_luong}</td>
+                            <td>${info.thanh_tien.toLocaleString('vi-VN')} VND</td>
+                        </tr>`;
+                    }
+                    tbody.innerHTML = html;
+
+                    document.getElementById('tong-tien').textContent =
+                        formatVND(data.tong_tien);
+
+                    status.textContent = `✅ Nhận diện được ${data.so_mon} món!`;
+                } else {
+                    tbody.innerHTML = `<tr class="empty-row">
+                        <td colspan="3">⚠️ Không nhận diện được món nào!</td>
+                    </tr>`;
+                    document.getElementById('tong-tien').textContent = formatVND(0);
+                    status.textContent = '⚠️ Thử lại với ánh sáng tốt hơn';
+                }
+            })
+            .catch(err => {
+                status.textContent = '❌ Lỗi kết nối!';
+            })
+            .finally(() => {
+                btn.disabled = false;
+            });
+    }
+
+    function thanhToan() {
+        const status = document.getElementById('status');
+        status.textContent = '💰 Vui lòng quét mã QR để hoàn tất thanh toán.';
+    }
+</script>
+
+</body>
+</html>
