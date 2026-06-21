@@ -1,0 +1,418 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+import os
+
+# Trỏ đến thư mục dataset trên Drive của bạn
+DATASET_PATH = "/content/drive/MyDrive/Canteen_Project/dataset_mon_an"
+
+# Liệt kê các món ăn
+classes = sorted(os.listdir(DATASET_PATH))
+print(f"Tổng số loại món: {len(classes)}")
+print("─" * 40)
+
+total_images = 0
+for cls in classes:
+    cls_path = os.path.join(DATASET_PATH, cls)
+    if os.path.isdir(cls_path):
+        # Đếm file ảnh
+        images = [f for f in os.listdir(cls_path)
+                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        total_images += len(images)
+        status = "✅" if len(images) >= 20 else "⚠️ Ít ảnh"
+        print(f"{status} {cls}: {len(images)} ảnh")
+
+print("─" * 40)
+print(f"Tổng cộng: {total_images} ảnh")
+
+MENU_PRICES = {
+    "1. Cơm trắng"      : 10000,
+    "2. Đậu hũ sốt cà"  : 25000,
+    "3. Cá hú kho"      : 30000,
+    "4. Thịt kho trứng" : 30000,
+    "5. Thịt kho"       : 25000,
+    "6. Canh chua"      : 25000,  # Gộp chung, không phân biệt có cá hay không
+    "7. Sườn nướng"     : 30000,
+    "8. Canh rau"       : 7000,
+    "9. Rau xào"        : 10000,
+    "10. Trứng chiên"   : 25000,
+}
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import random
+
+fig, axes = plt.subplots(2, 5, figsize=(15, 6))
+fig.suptitle("Mẫu ảnh từ dataset", fontsize=14)
+
+for i, cls in enumerate(classes[:10]):
+    cls_path = os.path.join(DATASET_PATH, cls)
+    images = [f for f in os.listdir(cls_path)
+              if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+    if images:
+        # Chọn ngẫu nhiên 1 ảnh
+        sample = random.choice(images)
+        img_path = os.path.join(cls_path, sample)
+        img = mpimg.imread(img_path)
+
+        row, col = i // 5, i % 5
+        axes[row][col].imshow(img)
+        axes[row][col].set_title(cls, fontsize=8)
+        axes[row][col].axis('off')
+
+plt.tight_layout()
+plt.show()
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms, models
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import json
+from sklearn.metrics import classification_report
+
+# Kiểm tra GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Đang dùng: {device}")
+# Nên thấy: Đang dùng: cuda
+
+# Transform = các bước xử lý ảnh trước khi đưa vào model
+
+# Transform cho tập TRAIN (có augmentation để tăng độ đa dạng)
+train_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomVerticalFlip(),
+    transforms.RandomRotation(30),
+    transforms.ColorJitter(
+        brightness=0.4,
+        contrast=0.4,
+        saturation=0.3,
+        hue=0.1
+    ),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+DATASET_PATH = "/content/drive/MyDrive/Canteen_Project/dataset_mon_an"
+
+# Load toàn bộ dataset
+full_dataset = datasets.ImageFolder(
+    root=DATASET_PATH,
+    transform=train_transform
+)
+
+# In thông tin
+print(f"Tổng số ảnh   : {len(full_dataset)}")
+print(f"Số loại món   : {len(full_dataset.classes)}")
+print(f"Danh sách món : {full_dataset.classes}")
+
+# Lưu mapping tên món để dùng sau
+class_to_idx = full_dataset.class_to_idx
+idx_to_class = {v: k for k, v in class_to_idx.items()}
+print(f"\nMapping index → tên món:")
+for idx, name in idx_to_class.items():
+    print(f"  {idx}: {name}")
+
+# Chia 80% train, 20% validation
+total = len(full_dataset)
+train_size = int(0.8 * total)
+val_size = total - train_size
+
+train_dataset, val_dataset = random_split(
+    full_dataset,
+    [train_size, val_size],
+    generator=torch.Generator().manual_seed(42)  # Để kết quả ổn định
+)
+
+# Gán transform riêng cho val
+val_dataset.dataset.transform = val_transform
+
+# Tạo DataLoader
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=32,      # Xử lý 32 ảnh mỗi lần
+    shuffle=True,       # Trộn ngẫu nhiên
+    num_workers=2
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=32,
+    shuffle=False,
+    num_workers=2
+)
+
+print(f"Train: {train_size} ảnh | Val: {val_size} ảnh")
+
+def build_resnet50(num_classes):
+    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+
+    for name, param in model.named_parameters():
+        if "layer4" in name or "fc" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+
+    num_features = model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Dropout(0.5),
+        nn.Linear(num_features, 256),
+        nn.ReLU(),
+        nn.Dropout(0.3),
+        nn.Linear(256, num_classes)
+    )
+    return model
+
+NUM_CLASSES = len(full_dataset.classes)
+model = build_resnet50(NUM_CLASSES)
+model = model.to(device)
+
+print(f"✅ Model ResNet50 sẵn sàng")
+print(f"   Số loại món cần nhận diện: {NUM_CLASSES}")
+
+# Loss function: CrossEntropy cho bài toán phân loại nhiều lớp
+class_weights = torch.ones(NUM_CLASSES)
+for i, name in enumerate(full_dataset.classes):
+    if "Sườn" in name:
+        class_weights[i] = 2.5
+    elif "Thịt kho" in name and "trứng" not in name.lower():
+        class_weights[i] = 2.5
+    elif "Đậu hũ" in name:
+        class_weights[i] = 2.0
+    elif "Cá hú" in name:
+        class_weights[i] = 2.0
+
+class_weights = class_weights.to(device)
+criterion = nn.CrossEntropyLoss(weight=class_weights)
+print("✅ Class weights:", class_weights)
+
+# Optimizer: Chỉ train các parameter của layer fc (layer cuối)
+# Unfreeze layer4 nên cần learning rate nhỏ hơn cho layer4
+optimizer = optim.Adam([
+    {"params": model.fc.parameters(),    "lr": 0.001},
+    {"params": model.layer4.parameters(), "lr": 0.0001},
+])
+# Scheduler: Giảm learning rate nếu val_loss không cải thiện
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    patience=3,    # Chờ 3 epoch không cải thiện mới giảm lr
+    factor=0.5     # Giảm lr xuống còn 50%
+)
+
+def train_one_epoch(model, loader, criterion, optimizer):
+    model.train()
+    total_loss, total_correct, total_samples = 0, 0, 0
+
+    for batch_idx, (images, labels) in enumerate(loader):
+        images, labels = images.to(device), labels.to(device)
+
+        optimizer.zero_grad()           # Reset gradient
+        outputs = model(images)         # Forward pass
+        loss = criterion(outputs, labels)  # Tính loss
+        loss.backward()                 # Backward pass
+        optimizer.step()                # Cập nhật weights
+
+        # Tính accuracy
+        _, predicted = torch.max(outputs, 1)
+        total_correct += (predicted == labels).sum().item()
+        total_loss += loss.item() * images.size(0)
+        total_samples += images.size(0)
+
+    return total_loss / total_samples, total_correct / total_samples
+
+
+def validate(model, loader, criterion):
+    model.eval()
+    total_loss, total_correct, total_samples = 0, 0, 0
+
+    with torch.no_grad():   # Không tính gradient khi validate
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            _, predicted = torch.max(outputs, 1)
+            total_correct += (predicted == labels).sum().item()
+            total_loss += loss.item() * images.size(0)
+            total_samples += images.size(0)
+
+    return total_loss / total_samples, total_correct / total_samples
+
+import shutil
+import os
+
+print("Đang copy dataset... chờ 1-2 phút")
+
+# Xóa thư mục cũ nếu tồn tại
+if os.path.exists("/content/dataset_mon_an"):
+    shutil.rmtree("/content/dataset_mon_an")
+
+shutil.copytree(
+    "/content/drive/MyDrive/Canteen_Project/dataset_mon_an",
+    "/content/dataset_mon_an"
+)
+print("✅ Copy xong!")
+
+# Bước 2: Đổi path rồi chạy lại từ phần Load dataset
+DATASET_PATH = "/content/dataset_mon_an"  # Đổi từ Drive sang local
+
+# ── BẮT ĐẦU TRAIN ──────────────────────────────────────────
+EPOCHS = 30
+best_val_acc = 0
+history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+
+print("Bắt đầu training...")
+print("=" * 60)
+
+for epoch in range(EPOCHS):
+    train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer)
+    val_loss, val_acc = validate(model, val_loader, criterion)
+
+    scheduler.step(val_loss)
+
+    # Lưu lịch sử
+    history["train_loss"].append(train_loss)
+    history["val_loss"].append(val_loss)
+    history["train_acc"].append(train_acc)
+    history["val_acc"].append(val_acc)
+
+    # In kết quả mỗi epoch
+    print(f"Epoch {epoch+1:2d}/{EPOCHS} | "
+          f"Train Loss: {train_loss:.4f} Acc: {train_acc:.1%} | "
+          f"Val Loss: {val_loss:.4f} Acc: {val_acc:.1%}")
+
+    # Lưu model tốt nhất
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        torch.save(model.state_dict(), "best_resnet50.pt")
+        print(f"  💾 Lưu model tốt nhất! Val Acc: {val_acc:.1%}")
+
+print("=" * 60)
+print(f"✅ Training xong! Best Val Accuracy: {best_val_acc:.1%}")
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+# Loss
+ax1.plot(history["train_loss"], label="Train Loss")
+ax1.plot(history["val_loss"], label="Val Loss")
+ax1.set_title("Loss theo Epoch")
+ax1.set_xlabel("Epoch")
+ax1.set_ylabel("Loss")
+ax1.legend()
+ax1.grid(True)
+
+# Accuracy
+ax2.plot(history["train_acc"], label="Train Accuracy")
+ax2.plot(history["val_acc"], label="Val Accuracy")
+ax2.set_title("Accuracy theo Epoch")
+ax2.set_xlabel("Epoch")
+ax2.set_ylabel("Accuracy")
+ax2.legend()
+ax2.grid(True)
+
+plt.tight_layout()
+plt.savefig("training_history.png")
+plt.show()
+print(f"Best Validation Accuracy: {best_val_acc:.1%}")
+
+import shutil, json, os
+
+SAVE_DIR = "/content/drive/MyDrive/Canteen_Project/models"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+# Lưu model
+shutil.copy("best_resnet50.pt", f"{SAVE_DIR}/resnet50_canteen.pt")
+
+# Lưu metadata (tên món, index)
+metadata = {
+    "idx_to_class" : idx_to_class,
+    "class_to_idx" : class_to_idx,
+    "num_classes"  : NUM_CLASSES,
+    "classes"      : full_dataset.classes,
+    "best_val_acc" : best_val_acc,
+}
+with open(f"{SAVE_DIR}/metadata.json", "w", encoding="utf-8") as f:
+    json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+print("✅ Đã lưu lên Drive!")
+print(f"   → {SAVE_DIR}/resnet50_canteen.pt")
+print(f"   → {SAVE_DIR}/metadata.json")
+
+for f in os.listdir(SAVE_DIR):
+    size = os.path.getsize(f"{SAVE_DIR}/{f}") / (1024*1024)
+    print(f"✅ {f} — {size:.1f} MB")
+
+!pip install ultralytics -q
+
+!pip install roboflow
+
+from roboflow import Roboflow
+rf = Roboflow(api_key="b59B9LOLgxvaC7lvGMhl")
+project = rf.workspace("tuyt-nguyn-th-ngc-s-workspace").project("canteen_detection-kemyo")
+version = project.version(3)
+dataset = version.download("yolov8")
+
+# Kiểm tra dataset đã download chưa
+import os
+
+DATASET_PATH = dataset.location
+print(f"Dataset tại: {DATASET_PATH}")
+print()
+
+# Đếm số ảnh
+for split in ["train", "valid", "test"]:
+    img_dir = os.path.join(DATASET_PATH, split, "images")
+    if os.path.exists(img_dir):
+        n = len(os.listdir(img_dir))
+        print(f"{split}: {n} ảnh")
+
+from ultralytics import YOLO
+
+# Load model pretrained
+model = YOLO("yolov8n.pt")
+
+# Bắt đầu train
+results = model.train(
+    data=f"{dataset.location}/data.yaml",
+    epochs=50,
+    imgsz=640,
+    batch=16,
+    patience=10,
+    device=0,
+    project="/content/drive/MyDrive/Canteen_Project",
+    name="yolov8_canteen_v3",
+    exist_ok=True
+)
+
+print("✅ Train xong!")
+print(f"Model tốt nhất: /content/drive/MyDrive/Canteen_Project/yolov8_canteen_v3/weights/best.pt")
+
+import json
+import os
+
+SAVE_DIR = "/content/drive/MyDrive/Canteen_Project/models"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+yolo_info = {
+    "model_type"     : "yolov8n",
+    "model_file"     : "yolov8n.pt",
+    "conf_threshold" : 0.3,
+    "note"           : "Trained on canteen dataset"
+}
+
+with open(f"{SAVE_DIR}/yolo_config.json", "w") as f:
+    json.dump(yolo_info, f, indent=2)
+
+print("✅ Đã lưu yolo_config.json")
+
+print(results.save_dir)
